@@ -1,56 +1,73 @@
 * Consensus Algorithm
-  
-** RPC Messages
+
+** State
 
 #+BEGIN_SRC haskell
 data Pid = Int
 
-data Command = String           -- command for the state machine
+data Entry = Entry { cmdTerm :: Int    -- term when entry is received
+                   , command :: String -- command for the state machine
+                   }
 
-data Message = RequestVote { term         :: Int -- candidate's term
-                           , candidateId  :: Pid -- candidate requesting vote
-                           , lastLogIndex :: Int -- index of candidate's last log entry
-                           , lastLogTerm  :: Int -- term of candidate's last log entry
-                           }
+data ServerType = Follower | Candidate | Leader
 
-             | RequestVoteResp { term        :: Int  -- for candidate to update itself
-                               , voteGranted :: Bool -- true means candidate received vote
-                               }
+data State = State { serverType :: ServerType
+                   -- -----------------------------------------------------------
+                   -- Persistent state on all servers
+                   -- -----------------------------------------------------------
+                   , currentTerm :: Int       -- latest term server has seen
+                   , votedFor    :: Maybe Pid -- pid of the candidate voted for
+                                              -- in current term
+                   , log         :: [Entry]   -- log entries
+                   -- -----------------------------------------------------------
+                   -- Volatile state on all servers
+                   -- -----------------------------------------------------------
+                   , commitIndex :: Int -- index of highest log entry known committed
+                   , lastApplied :: Int -- index of highest log entry applied to the 
+                                        -- state machine
+                   -- -----------------------------------------------------------
+                   -- Volatile state on leaders
+                   -- -----------------------------------------------------------
+                   , nextIndex  :: [Int] -- for each server, index of the next
+                                         -- log entry to send to that server
+                   , matchIndex :: [Int] -- for each server, index of highest log
+                                         -- entry known to be replicated on server
+                  }
 
-             | AppendEntries { term         :: Int       -- leader's term
-                             , leaderId     :: Pid       -- so follower can redirect clients
-                             , prevLogIndex :: Int       -- index of log entry immediately preceding new ones
-                             , prevLogTerm  :: Int       -- term of prevLogIndex entry
-                             , entries      :: [Command] -- log entries to store, empty for heartbeat
-                             , leaderCommit :: Int       -- leader's commit index
+#+END_SRC
+  
+** RPC Messages
+
+#+BEGIN_SRC haskell
+data Message =
+    RequestVote { term         :: Int -- candidate's term
+                , candidateId  :: Pid -- candidate requesting vote
+                , lastLogIndex :: Int -- index of candidate's last log entry
+                , lastLogTerm  :: Int -- term of candidate's last log entry
+                }
+  
+  | RequestVoteResp { term        :: Int  -- for candidate to update itself
+                    , voteGranted :: Bool -- true means candidate received vote
+                    }
+  
+  | AppendEntries { term         :: Int     -- leader's term
+                  , leaderId     :: Pid     -- so follower can redirect clients
+                  , prevLogIndex :: Int     -- index of log entry immediately preceding new ones
+                  , prevLogTerm  :: Int     -- term of prevLogIndex entry
+                  , entries      :: [Entry] -- log entries to store, empty for heartbeat
+                  , leaderCommit :: Int     -- leader's commit index
                              }
-
-             | AppendEntriesResp { term    :: Int -- for leader to update itself
-                                 , success :: Pid -- true if follower contained entry matching
-                                                  -- prevLogIndex and prevLogTerm
-                                 }
+  
+  | AppendEntriesResp { term    :: Int -- for leader to update itself
+                      , success :: Pid -- true if follower contained entry matching
+                                       -- prevLogIndex and prevLogTerm
+                      }
 
 #+END_SRC
 
 ** Leader Election
 
 #+BEGIN_SRC haskell
-data ServerState = Follower
-                 | Candidate
-                 | Leader
-
-data State = State { serverState :: ServerState
-                   -- -----------------------------------------------------------
-                   -- Persistent states on all servers
-                   -- -----------------------------------------------------------
-                   , currentTerm :: Int       -- latest term server has seen
-                   , votedFor    :: Maybe Pid -- 
-                   , log         :: [Command] -- 
-                   -- -----------------------------------------------------------
-                   -- Volatile states on all servers
-                   -- -----------------------------------------------------------
-                   commitIndex   :: 
-                   }
 
 leader_election :: State -> State
 leader_election = undefined
