@@ -1,0 +1,30 @@
+* Consensus Algorithm
+
+** Leader Election
+
+#+BEGIN_SRC haskell
+data Pid = Int
+
+data ServerState = Follower
+                 | Candidate
+                 | Leader
+
+-- command for the state machine
+data Command = String
+
+data State = State { serverState :: ServerState
+                   -- -----------------------------------------------------------
+                   -- Persistent states on all servers
+                   -- -----------------------------------------------------------
+                   , currentTerm :: Int       -- latest term server has seen
+                   , votedFor    :: Maybe Pid -- 
+                   , log         :: [Command] -- 
+                   -- -----------------------------------------------------------
+                   -- Volatile states on all servers
+                   -- -----------------------------------------------------------
+                   commitIndex   :: 
+                   }
+
+leader_election :: State -> State
+leader_election = undefined
+#+END_SRC
