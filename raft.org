@@ -11,28 +11,27 @@ data Entry = Entry { cmdTerm :: Int    -- term when entry is received
 
 data ServerType = Follower | Candidate | Leader
 
-data State = State { serverType :: ServerType
-                   -- -----------------------------------------------------------
-                   -- Persistent state on all servers
-                   -- -----------------------------------------------------------
-                   , currentTerm :: Int       -- latest term server has seen
-                   , votedFor    :: Maybe Pid -- pid of the candidate voted for
-                                              -- in current term
-                   , log         :: [Entry]   -- log entries
-                   -- -----------------------------------------------------------
-                   -- Volatile state on all servers
-                   -- -----------------------------------------------------------
-                   , commitIndex :: Int -- index of highest log entry known committed
-                   , lastApplied :: Int -- index of highest log entry applied to the 
-                                        -- state machine
-                   -- -----------------------------------------------------------
-                   -- Volatile state on leaders
-                   -- -----------------------------------------------------------
-                   , nextIndex  :: [Int] -- for each server, index of the next
-                                         -- log entry to send to that server
-                   , matchIndex :: [Int] -- for each server, index of highest log
-                                         -- entry known to be replicated on server
-                  }
+data State = State { -- -----------------------------------------------------------
+                     -- Persistent state on all servers
+                     -- -----------------------------------------------------------
+                       currentTerm :: Int       -- latest term server has seen
+                     , votedFor    :: Maybe Pid -- pid of the candidate voted for
+                                                -- in current term
+                     , log         :: [Entry]   -- log entries
+                     -- -----------------------------------------------------------
+                     -- Volatile state on all servers
+                     -- -----------------------------------------------------------
+                     , commitIndex :: Int -- index of highest log entry known committed
+                     , lastApplied :: Int -- index of highest log entry applied to the 
+                                          -- state machine
+                     -- -----------------------------------------------------------
+                     -- Volatile state on leaders
+                     -- -----------------------------------------------------------
+                     , nextIndex  :: [Int] -- for each server, index of the next
+                                           -- log entry to send to that server
+                     , matchIndex :: [Int] -- for each server, index of highest log
+                                           -- entry known to be replicated on server
+                     }  
 
 #+END_SRC
   
@@ -56,7 +55,7 @@ data Message =
                   , prevLogTerm  :: Int     -- term of prevLogIndex entry
                   , entries      :: [Entry] -- log entries to store, empty for heartbeat
                   , leaderCommit :: Int     -- leader's commit index
-                             }
+                  }
   
   | AppendEntriesResp { term    :: Int -- for leader to update itself
                       , success :: Pid -- true if follower contained entry matching
@@ -68,7 +67,61 @@ data Message =
 ** Leader Election
 
 #+BEGIN_SRC haskell
+n       = 5
+-- every node on the system
+servers :: [Pid]
+servers =  [1..n]
 
-leader_election :: State -> State
-leader_election = undefined
+-- candidate's event loop
+candidate :: State -> Process ()
+candidate s@(State{..}) = do
+  self <- getSelfPid
+  let term' = term + 1
+      msg   = RequestVote { term         = term'
+                          , candidateId  = self
+                          , lastLogIndex = length log
+                          , lastLogTerm  = cmdTerm (last log)
+                          }
+  -- request vote from everyone
+  forM servers (\p -> send p msg)
+
+  let s' = s { term      = term'
+             , votedFor  = Just self
+             }
+  waitForVotes s' 1
+
+waitForVotes :: State -> Int -> Process () 
+waitForVotes s@(State{..}) c =
+  if   2 * c > n
+  then leader s                 -- become the leader
+  else do msg <- recv
+          case msg of
+            RequestVoteResp(term',vote) ->
+              if   vote
+              then waitForVotes s (c+1)
+              else if term' > term
+                   then follower (s { term = term' }) -- become a follower
+                   else waitForVotes s c -- loop
+            Timeout ->
+              candidate s       -- restart a new election
+            AppendEntries(term',pid,prevLI,prevLT,commitI) ->
+              if   term' >= term
+              then follower (s { term = term' }) -- become a follower
+              else waitForVotes s c -- loop
+
+-- follower's event loop              
+follower :: State -> Process ()
+follower s@(State{..}) = do
+  msg <- recv
+  case msg of
+    RequestVote(term',pid,lli,llt) ->
+      do let my_lli = length log
+             my_llt = cmdTerm (last log)
+         when (term' > term &&                                  -- is it a new term ?
+               (votedFor == Just pid || votedFor == Nothing) && -- have I voted before ?
+               (llt,lli) >= (my_llt, my_lli)) $                  -- is candidate up to date ?
+           send pid (RequestVoteResp term True)
+    ...
 #+END_SRC
+
+
