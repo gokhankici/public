@@ -20,9 +20,9 @@ before responding to RPCs
 - =lastApplied=: index of highest entry applied to the state machine
   (initialized to 0, increases monotonically)
 
-- =nextIndex[1...P]=: index of the next log entry to send (initialized to
+- =nextIndex[P0...PN]=: index of the next log entry to send (initialized to
   leader's last log index + 1)
-- =matchIndex[1...P]=: index of the highest log entry known to be replicated
+- =matchIndex[P0...PN]=: index of the highest log entry known to be replicated
   (initialized to 0, increases monotonically)
   
 ** Comparison functions
@@ -56,13 +56,17 @@ case msg of
         then do
           -- vote only once
           set votedFor pid
+          -- respond with success
           send pid RequestVoteResponse(currentTerm, True)
         else
+          -- we have already voted for someone else, or
+          -- candidate's last log entry is not as recent as ours
           send pid RequestVoteResponse(currentTerm, False)
 
   AppendEntries(term, pid, prevLogIndex, prevLogTerm, entries, lastCommit) ->
     if   term < currentTerm
     then
+      -- received message from a previous leader
       send pid AppendEntriesResponse(currentTerm, False)
     else do
       -- update current term
@@ -71,13 +75,16 @@ case msg of
       let (t, cmd) = log !! prevLogIndex
       if t /= prevLogTerm
         then
+          -- local previous log entry does not match leader's
           send pid AppendEntriesResponse(currentTerm, False)
         else do
-          -- update the local log entry
+          -- use entries to update and/or extend the local log
           forM [prevLogIndex + 1 ... length entries] $ \i ->
             set log i (entries !! i)
+          -- check if leader has new entries committed
           when (lastCommit > commitIndex) $
             set commitIndex (min localCommit (prevLogIndex + length entries))
+          -- respond with success
           send pid AppendEntriesResponse(currentTerm, True)
 #+END_SRC
 
