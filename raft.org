@@ -1,5 +1,4 @@
-* Consensus Algorithm
-
+* Properties
 ** State
    
 | persistent (all) | volatile (all) | volatile (only leader) |
@@ -40,13 +39,27 @@ isRecent logs (entry@(term,index)) =
   in le (llt, lli) entry
 #+END_SRC
 
+* Types of Processes
+
+Follower and candidate processes are of the following form:
+
+#+BEGIN_SRC
+while true:
+  msg <- recv
+  case msg of
+    ...
+#+END_SRC
+
+Leader is not because it sends and empty =AppendEntries= message to everyone
+when it's elected, and doing this in the candidate process would create a race
+condition.
+
 ** Follower
 
 #+BEGIN_SRC haskell
 case msg of
   RequestVote(term, pid, lastLogIndex, lastLogTerm) ->
-    if   term < currentTerm
-    then
+    if term < currentTerm then
       -- received message from a previous leader
       send pid RequestVoteResponse(currentTerm, False)
     else do
@@ -55,26 +68,28 @@ case msg of
       if   votedFor == None && isRecent log (lastLogTerm, lastLogIndex)
         then do
           -- vote only once
-          set votedFor pid
+          set votedFor (Just pid)
           -- respond with success
           send pid RequestVoteResponse(currentTerm, True)
+          -- reset the timer since we voted for a candidate (a possible future leader)
+          reset Timer
         else
           -- we have already voted for someone else, or
           -- candidate's last log entry is not as recent as ours
           send pid RequestVoteResponse(currentTerm, False)
 
   AppendEntries(term, pid, prevLogIndex, prevLogTerm, entries, lastCommit) ->
-    if   term < currentTerm
-    then
+    if term < currentTerm then
       -- received message from a previous leader
       send pid AppendEntriesResponse(currentTerm, False)
     else do
+      reset Timer           -- since we heard from the current or a newer leader
       -- update current term
       set currentTerm term
+      set votedFor    None
       -- find the index right before where the entries should go
       let (t, cmd) = log !! prevLogIndex
-      if t /= prevLogTerm
-        then
+      if t /= prevLogTerm then
           -- local previous log entry does not match leader's
           send pid AppendEntriesResponse(currentTerm, False)
         else do
@@ -88,131 +103,76 @@ case msg of
           send pid AppendEntriesResponse(currentTerm, True)
 #+END_SRC
 
+** Candidate
 
-# * Consensus Algorithm
+We need to keep track of 2 extra variables here:
+1. =noOfGrants= to keep track of grants for its candidacy
+2. =isLeader= is set when =noOfGrants= reaches a majority
 
-# ** State
 
-# #+BEGIN_SRC haskell
-# data Pid = Int
+#+BEGIN_SRC haskell
+case msg of
+  -- if the candidate doesn't hear back from a majority during its election
+  -- period or doesn't get a heart beat message from the leader for a while, it
+  -- starts another election
+  Timer -> do
+    -- update the state for a new election
+    set currentTerm (currentTerm + 1)
+    set votedFor    (Just self)
+    set isLeader    False
+    set noOfGrants  1
+    -- request vote from everyone
+    forM every_server $ \p ->
+      let lli       = length log
+          (llt,cmd) = last log
+      in send p RequestVote(currentTerm, self, lli, llt)
+         
+  RequestVoteReply(term, voteGranted) ->
+    if term > currentTerm then do
+      -- update the term and be a follower
+      set votedFor    None
+      set currentTerm term
+    else if voteGranted then do
+      -- increment vote count
+      set noOfGrants (noOfGrants + 1)
+      when (2 * noOfGrants > no_of_procs) $
+        -- become the leader
+        set isLeader True
+    else
+      -- keep waiting for remaining responses
+      return ()
+#+END_SRC
 
-# data Entry = Entry { cmdTerm :: Int    -- term when entry is received
-#                    , command :: String -- command for the state machine
-#                    }
+** Leader
 
-# data ServerType = Follower | Candidate | Leader
+#+BEGIN_SRC haskell
+asdf                            -- remove this
 
-# data State = State { -- -----------------------------------------------------------
-#                      -- Persistent state on all servers
-#                      -- -----------------------------------------------------------
-#                        currentTerm :: Int       -- latest term server has seen
-#                      , votedFor    :: Maybe Pid -- pid of the candidate voted for
-#                                                 -- in current term
-#                      , log         :: [Entry]   -- log entries
-#                      -- -----------------------------------------------------------
-#                      -- Volatile state on all servers
-#                      -- -----------------------------------------------------------
-#                      , commitIndex :: Int -- index of highest log entry known committed
-#                      , lastApplied :: Int -- index of highest log entry applied to the 
-#                                           -- state machine
-#                      -- -----------------------------------------------------------
-#                      -- Volatile state on leaders
-#                      -- -----------------------------------------------------------
-#                      , nextIndex  :: [Int] -- for each server, index of the next
-#                                            -- log entry to send to that server
-#                      , matchIndex :: [Int] -- for each server, index of highest log
-#                                            -- entry known to be replicated on server
-#                      }  
+synchronizeWithFollowers =
+  -- back and forth between the followers and the leader
+  -- it forces the followers to have the same log sequence as the leader
+  undefined
 
-# #+END_SRC
+leader = do
+  set commitIndex 0
+  set lastApplied 0
   
-# ** RPC Messages
+  -- send an empty AppendEntries msg to announce leadership
+  forM every_server $ \p ->
+    let lli       = length log
+        (llt,cmd) = last log
+    in send p AppendEntries(currentTerm, self, lli, llt, [], commitIndex)
+  -- sync with followers
+  synchronizeWithFollowers
+  leaderLoop
 
-# #+BEGIN_SRC haskell
-# data Message =
-#     RequestVote { term         :: Int -- candidate's term
-#                 , candidateId  :: Pid -- candidate requesting vote
-#                 , lastLogIndex :: Int -- index of candidate's last log entry
-#                 , lastLogTerm  :: Int -- term of candidate's last log entry
-#                 }
-  
-#   | RequestVoteResp { term        :: Int  -- for candidate to update itself
-#                     , voteGranted :: Bool -- true means candidate received vote
-#                     }
-  
-#   | AppendEntries { term         :: Int     -- leader's term
-#                   , leaderId     :: Pid     -- so follower can redirect clients
-#                   , prevLogIndex :: Int     -- index of log entry immediately preceding new ones
-#                   , prevLogTerm  :: Int     -- term of prevLogIndex entry
-#                   , entries      :: [Entry] -- log entries to store, empty for heartbeat
-#                   , leaderCommit :: Int     -- leader's commit index
-#                   }
-  
-#   | AppendEntriesResp { term    :: Int -- for leader to update itself
-#                       , success :: Pid -- true if follower contained entry matching
-#                                        -- prevLogIndex and prevLogTerm
-#                       }
-
-# #+END_SRC
-
-# ** Leader Election
-
-# #+BEGIN_SRC haskell
-# n       = 5
-# -- every node on the system
-# servers :: [Pid]
-# servers =  [1..n]
-
-# -- candidate's event loop
-# candidate :: State -> Process ()
-# candidate s@(State{..}) = do
-#   self <- getSelfPid
-#   let term' = term + 1
-#       msg   = RequestVote { term         = term'
-#                           , candidateId  = self
-#                           , lastLogIndex = length log
-#                           , lastLogTerm  = cmdTerm (last log)
-#                           }
-#   -- request vote from everyone
-#   forM servers (\p -> send p msg)
-
-#   let s' = s { term      = term'
-#              , votedFor  = Just self
-#              }
-#   waitForVotes s' 1
-
-# waitForVotes :: State -> Int -> Process () 
-# waitForVotes s@(State{..}) c =
-#   if   2 * c > n
-#   then leader s                 -- become the leader
-#   else do msg <- recv
-#           case msg of
-#             RequestVoteResp(term',vote) ->
-#               if   vote
-#               then waitForVotes s (c+1)
-#               else if term' > term
-#                    then follower (s { term = term' }) -- become a follower
-#                    else waitForVotes s c -- loop
-#             Timeout ->
-#               candidate s       -- restart a new election
-#             AppendEntries(term',pid,prevLI,prevLT,commitI) ->
-#               if   term' >= term
-#               then follower (s { term = term' }) -- become a follower
-#               else waitForVotes s c -- loop
-
-# -- follower's event loop              
-# follower :: State -> Process ()
-# follower s@(State{..}) = do
-#   msg <- recv
-#   case msg of
-#     RequestVote(term',pid,lli,llt) ->
-#       do let my_lli = length log
-#              my_llt = cmdTerm (last log)
-#          when (term' > term &&                                  -- is it a new term ?
-#                (votedFor == Just pid || votedFor == Nothing) && -- have I voted before ?
-#                (llt,lli) >= (my_llt, my_lli)) $                  -- is candidate up to date ?
-#            send pid (RequestVoteResp term True)
-#     ...
-# #+END_SRC
-
+leaderLoop = do
+  ClientMsg{..} <- recv
+  forM every_server $ \p ->
+    let lli       = length log
+        (llt,cmd) = last log
+    in send p AppendEntries(currentTerm, self, lli, llt, [], commitIndex)
+  -- TODO: counting of received msgs
+  loop
+#+END_SRC
 
