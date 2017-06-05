@@ -64,11 +64,11 @@ case msg of
       send pid RequestVoteResponse(currentTerm, False)
     else do
       -- update current term
-      set currentTerm term
+      update currentTerm term
       if   votedFor == None && isRecent log (lastLogTerm, lastLogIndex)
         then do
           -- vote only once
-          set votedFor (Just pid)
+          update votedFor (Just pid)
           -- respond with success
           send pid RequestVoteResponse(currentTerm, True)
           -- reset the timer since we voted for a candidate (a possible future leader)
@@ -85,8 +85,8 @@ case msg of
     else do
       reset Timer           -- since we heard from the current or a newer leader
       -- update current term
-      set currentTerm term
-      set votedFor    None
+      update currentTerm term
+      update votedFor    None
       -- find the index right before where the entries should go
       let (t, cmd) = log !! prevLogIndex
       if t /= prevLogTerm then
@@ -98,7 +98,7 @@ case msg of
             set log i (entries !! i)
           -- check if leader has new entries committed
           when (lastCommit > commitIndex) $
-            set commitIndex (min localCommit (prevLogIndex + length entries))
+            update commitIndex (min localCommit (prevLogIndex + length entries))
           -- respond with success
           send pid AppendEntriesResponse(currentTerm, True)
 #+END_SRC
@@ -117,10 +117,10 @@ case msg of
   -- starts another election
   Timer -> do
     -- update the state for a new election
-    set currentTerm (currentTerm + 1)
-    set votedFor    (Just self)
-    set isLeader    False
-    set noOfGrants  1
+    update currentTerm (currentTerm + 1)
+    update votedFor    (Just self)
+    update isLeader    False
+    update noOfGrants  1
     -- request vote from everyone
     forM every_server $ \p ->
       let lli       = length log
@@ -130,14 +130,14 @@ case msg of
   RequestVoteReply(term, voteGranted) ->
     if term > currentTerm then do
       -- update the term and be a follower
-      set votedFor    None
-      set currentTerm term
+      update votedFor    None
+      update currentTerm term
     else if voteGranted then do
       -- increment vote count
-      set noOfGrants (noOfGrants + 1)
+      update noOfGrants (noOfGrants + 1)
       when (2 * noOfGrants > no_of_procs) $
         -- become the leader
-        set isLeader True
+        update isLeader True
     else
       -- keep waiting for remaining responses
       return ()
@@ -164,33 +164,77 @@ case msg of
   N.
 
 #+BEGIN_SRC haskell
-asdf                            -- remove this
-
-synchronizeWithFollowers =
-  -- back and forth between the followers and the leader
-  -- it forces the followers to have the same log sequence as the leader
-  undefined
-
 leader = do
-  set commitIndex 0
-  set lastApplied 0
-  
-  -- send an empty AppendEntries msg to announce leadership
-  forM every_server $ \p ->
-    let lli       = length log
-        (llt,cmd) = last log
-    in send p AppendEntries(currentTerm, self, lli, llt, [], commitIndex)
-  -- sync with followers
-  synchronizeWithFollowers
-  leaderLoop
+  let l = length log
 
-leaderLoop = do
-  ClientMsg{..} <- recv
-  forM every_server $ \p ->
-    let lli       = length log
-        (llt,cmd) = last log
-    in send p AppendEntries(currentTerm, self, lli, llt, [], commitIndex)
-  -- TODO: counting of received msgs
-  loop
+  update commitIndex 0
+  update lastApplied 0
+
+  forM every_server $ \p -> do
+    update nextIndex  p (l + 1) -- nextIndex[p]  <- l+1
+    update matchIndex p 0       -- matchIndex[p] <- 0
+
+  spawnLocal syncLog            -- replicate log entries
+  spawnLocal recvCmd            -- listen client requests
+
+
+syncLog = do
+  let l = length log
+
+  while True $ do
+    -- send an empty AppendEntries msg to announce leadership, OR
+    -- replicate the new logs added by the clients
+    forM everyServer $ \p ->
+      let ni = nextIndex !! p
+      in do send p AppendEntries { term        = currentTerm
+                                 , leaderId    = self
+                                 , prevIndex   = ni - 1
+                                 , prevTerm    = term (log !! ni - 1)
+                                 , entries     = [ log !! i | i <- [ni .. l]]
+                                 , commitIndex = commitIndex
+                                 }
+
+    -- collect results from everyone
+    forM everyServer $ \p -> do
+      AppendEntriesResponse(term, success) <- recv
+
+      when (term > currentTerm)
+        stepDown term
+
+      let ni = nextIndex !! p
+      if success
+        then -- p has all the logs
+             do update matchIndex p l
+                update nextIndex  p ((min l ni) + 1)
+        else -- try again with (nextIndex[p] <- nextIndex[p]-1)
+             update nextIndex p (ni - 1)
+
+    -- advance commitIndex if possible
+    advanceCommitIndex
+
+
+advanceCommitIndex = do
+  let s = sorted matchIndex
+      i = s !! (ceil (n / 2)) -- majority of p's matchIndex >= i
+      e = log !! i
+  when ((term e) == currentTerm) $ do
+    update commitIndex i
+    when (lastApplied < commitIndex)
+      apply [log !! i | i <- [lastApplied + 1 .. commitIndex]]
+      update lastApplied commitIndex
+      -- and send result to the client(s)
+      
+
+recvLog = do
+  while True $ do
+    ClientMsg(cmd) <- recv
+    append log Entry{ term = currentTerm
+                    , cmd  = cmd
+                    }
+
+
+stepDown newTerm = do
+  update currentTerm newTerm
+  update votedFor    None
 #+END_SRC
 
